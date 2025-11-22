@@ -1,24 +1,15 @@
-# src/skills_engine.py
+# skills_engine.py (ENHANCED VERSION)
 """
-Skills engine and learning-path generator.
-- Normalize and fuzzy-match user skill tokens to canonical skills.
-- Expanded ROLE_SKILLS library (practical, real-world skills).
-- Compute skill gaps and produce short learning paths per missing skill.
-
-Usage:
-    from skills_engine import SkillsEngine
-    se = SkillsEngine()
-    user_set = se.extract_skills_from_row(row)   # row = a pandas Series for a user
-    gap = se.compute_role_gap(user_set, "Software Engineer")
-    paths = se.make_learning_paths(gap["missing"])
+Enhanced Skills Engine with:
+- Skill priority levels (critical/important/nice-to-have)
+- Learning paths with duration estimates
+- Better skill matching and gap analysis
 """
 
 from pathlib import Path
 import re
 import json
-import math
 
-# Try to import rapidfuzz for better fuzzy matching; fallback to difflib
 try:
     from rapidfuzz import process as rf_process
     from rapidfuzz import fuzz as rf_fuzz
@@ -27,116 +18,208 @@ except Exception:
     import difflib
     _HAS_RAPIDFUZZ = False
 
-# ---------- Canonical skill library (expanded) ----------
-# Add or edit as you like.
+# ---------- EXPANDED ROLE SKILLS WITH PRIORITIES ----------
 ROLE_SKILLS = {
-    "Software Engineer": [
-        "data structures", "algorithms", "object oriented programming", "system design",
-        "rest apis", "http", "version control", "git", "github", "unit testing",
-        "integration testing", "debugging", "clean code", "design patterns",
-        "python", "java", "c++", "c#", "sql", "mysql", "postgresql",
-        "nosql", "mongodb", "linux", "bash", "docker", "kubernetes",
-        "ci/cd", "aws", "gcp", "azure", "redis", "performance tuning",
-        "security basics", "api design", "microservices", "oauth"
-    ],
-
-    "Frontend Developer": [
-        "html", "css", "javascript", "typescript", "react", "vue", "angular",
-        "responsive design", "accessibility", "web performance", "webpack",
-        "state management", "redux", "mobx", "next.js", "vite", "tailwind",
-        "sass", "figma", "ui design", "cross-browser"
-    ],
-
-    "Backend Developer": [
-        "node.js", "express", "python", "django", "flask", "java", "spring",
-        "rest apis", "graphql", "authentication", "authorization", "jwt",
-        "sql", "postgresql", "mysql", "mongodb", "redis", "docker", "kubernetes",
-        "microservices", "message queues", "rabbitmq", "kafka", "ci/cd"
-    ],
-
-    "AI Engineer": [
-        "python", "machine learning", "deep learning", "tensorflow", "pytorch",
-        "nlp", "computer vision", "data preprocessing", "feature engineering",
-        "model evaluation", "hyperparameter tuning", "mlops", "sklearn",
-        "pandas", "numpy", "model deployment", "docker"
-    ],
-
-    "Data Analyst": [
-        "excel", "sql", "tableau", "power bi", "data visualization",
-        "statistics", "pandas", "numpy", "data cleaning", "dashboarding",
-        "business intelligence", "storytelling"
-    ],
-
-    "Data Scientist": [
-        "python", "machine learning", "statistics", "feature engineering",
-        "modeling", "sql", "pandas", "numpy", "visualization", "mlops"
-    ],
-
-    "Product Manager": [
-        "product strategy", "roadmap", "user research", "communication",
-        "stakeholder management", "analytics", "prioritization", "okrs",
-        "user testing", "wireframing"
-    ]
+    "Software Engineer": {
+        "critical": ["python", "data structures", "algorithms", "git", "debugging"],
+        "important": ["object oriented programming", "rest apis", "sql", "unit testing", "system design"],
+        "nice_to_have": ["docker", "kubernetes", "ci/cd", "aws", "design patterns"]
+    },
+    
+    "Frontend Developer": {
+        "critical": ["html", "css", "javascript", "react"],
+        "important": ["responsive design", "state management", "webpack", "typescript"],
+        "nice_to_have": ["next.js", "tailwind", "figma", "accessibility"]
+    },
+    
+    "Backend Developer": {
+        "critical": ["python", "node.js", "sql", "rest apis"],
+        "important": ["databases", "authentication", "docker", "mongodb"],
+        "nice_to_have": ["graphql", "microservices", "kafka", "redis"]
+    },
+    
+    "AI Engineer": {
+        "critical": ["python", "machine learning", "statistics", "tensorflow"],
+        "important": ["deep learning", "nlp", "data preprocessing", "model evaluation"],
+        "nice_to_have": ["pytorch", "mlops", "computer vision", "hyperparameter tuning"]
+    },
+    
+    "Data Analyst": {
+        "critical": ["sql", "excel", "statistics", "data visualization"],
+        "important": ["tableau", "power bi", "pandas", "data cleaning"],
+        "nice_to_have": ["python", "dashboarding", "business intelligence"]
+    },
+    
+    "Data Scientist": {
+        "critical": ["python", "machine learning", "statistics", "sql"],
+        "important": ["feature engineering", "pandas", "numpy", "modeling"],
+        "nice_to_have": ["mlops", "visualization", "deep learning"]
+    },
+    
+    "Project Manager": {
+        "critical": ["communication", "product strategy", "roadmap"],
+        "important": ["stakeholder management", "user research", "prioritization"],
+        "nice_to_have": ["analytics", "okrs", "wireframing", "user testing"]
+    },
+    "Designer": {
+        "critical": ["ui design", "figma", "wireframing", "user research"],
+        "important": ["prototyping", "design systems", "accessibility", "visual design"],
+        "nice_to_have": ["animation", "illustration", "branding", "sketch"]
+    }
 }
 
-# Flatten unique set of canonical skills
-_ALL_CANONICAL_SKILLS = sorted({s.lower() for skills in ROLE_SKILLS.values() for s in skills})
+# Flatten all skills for matching
+_ALL_CANONICAL_SKILLS = []
+for role_data in ROLE_SKILLS.values():
+    for priority in ["critical", "important", "nice_to_have"]:
+        _ALL_CANONICAL_SKILLS.extend([s.lower() for s in role_data.get(priority, [])])
+_ALL_CANONICAL_SKILLS = sorted(set(_ALL_CANONICAL_SKILLS))
 
-# ---------- Aliases (common variants) ----------
-# Map messy tokens -> canonical skill
+# ---------- SKILL ALIASES ----------
 SKILL_ALIASES = {
     "js": "javascript",
-    "javascript": "javascript",
-    "react.js": "react",
     "reactjs": "react",
+    "react.js": "react",
     "react native": "react",
     "nodejs": "node.js",
     "node": "node.js",
     "py": "python",
-    "pyhton": "python",
     "ml": "machine learning",
     "dl": "deep learning",
-    "data structure": "data structures",
     "ds": "data structures",
     "algos": "algorithms",
     "db": "databases",
-    "sqlserver": "sql",
     "postgres": "postgresql",
-    "aws cloud": "aws",
-    "gcp cloud": "gcp",
     "k8s": "kubernetes",
-    "ci cd": "ci/cd",
-    "ci/cd": "ci/cd",
-    "unit test": "unit testing",
-    "ut": "unit testing",
-    "ux": "ui design",
-    "ui ux": "ui design"
+    "ci/cd": "ci cd",
+    "ui/ux": "ui design",
+    "ux": "ui design"
 }
 
-# ---------- Learning resources (short suggestions) ----------
-# For each canonical skill, small pointers (course/book/article)
+# ---------- LEARNING RESOURCES WITH DURATION ----------
 LEARNING_RESOURCES = {
-    "data structures": ["Grokking DS & Algorithms", "CS50 / free courses", "Practice on LeetCode (easy→hard)"],
-    "algorithms": ["CLRS (book)", "Algorithms by Robert Sedgewick", "LeetCode guided paths"],
-    "python": ["Official Python docs", "Automate the Boring Stuff", "Python for Everybody"],
-    "java": ["Java Programming", "Effective Java (book)"],
-    "git": ["Git official docs", "Pro Git book", "Practice branching & PR flow"],
-    "docker": ["Docker docs", "Deploy simple app with Docker"],
-    "kubernetes": ["Kubernetes basics (k8s.io)", "Play with Kubernetes tutorials"],
-    "machine learning": ["Andrew Ng Coursera", "Hands-on ML with Scikit-Learn & TF"],
-    "deep learning": ["Deep Learning Specialization (Coursera)", "PyTorch tutorials"],
-    "sql": ["Mode SQL tutorials", "SQLBolt"],
-    "react": ["Official React docs", "Build small apps with CRA or Vite"],
-    "html": ["MDN HTML guide"],
-    "css": ["MDN CSS guide", "Flexbox & Grid courses"],
-    "rest apis": ["Designing HTTP APIs", "Postman practice"],
-    "system design": ["Grokking System Design", "System design interview videos"]
+    # Critical Skills (2-3 months each)
+    "python": {
+        "resources": ["Python Crash Course (book)", "Automate the Boring Stuff", "100 Days of Code"],
+        "duration": "2-3 months",
+        "difficulty": "Beginner"
+    },
+    "data structures": {
+        "resources": ["Grokking DS & Algorithms", "LeetCode Easy→Medium (50 problems)", "CS50"],
+        "duration": "3-4 months",
+        "difficulty": "Intermediate"
+    },
+    "algorithms": {
+        "resources": ["CLRS (book)", "LeetCode pattern-based practice", "AlgoExpert"],
+        "duration": "3-4 months",
+        "difficulty": "Intermediate"
+    },
+    "javascript": {
+        "resources": ["JavaScript.info", "Eloquent JavaScript", "FreeCodeCamp JS"],
+        "duration": "2-3 months",
+        "difficulty": "Beginner"
+    },
+    "react": {
+        "resources": ["Official React Docs", "React Tutorial (scrimba)", "Build 3 projects"],
+        "duration": "1-2 months",
+        "difficulty": "Intermediate"
+    },
+    "sql": {
+        "resources": ["Mode SQL Tutorial", "SQLBolt", "HackerRank SQL practice"],
+        "duration": "1-2 months",
+        "difficulty": "Beginner"
+    },
+    "machine learning": {
+        "resources": ["Andrew Ng Coursera", "Hands-on ML with Scikit-Learn", "Kaggle competitions"],
+        "duration": "3-4 months",
+        "difficulty": "Advanced"
+    },
+    "git": {
+        "resources": ["Pro Git (free book)", "GitHub Learning Lab", "Practice branching"],
+        "duration": "2-3 weeks",
+        "difficulty": "Beginner"
+    },
+    "docker": {
+        "resources": ["Docker Docs", "Docker Mastery (Udemy)", "Deploy 2-3 apps"],
+        "duration": "1 month",
+        "difficulty": "Intermediate"
+    },
+    "html": {
+        "resources": ["MDN HTML Guide", "FreeCodeCamp Responsive Web Design"],
+        "duration": "2-3 weeks",
+        "difficulty": "Beginner"
+    },
+    "css": {
+        "resources": ["CSS Grid & Flexbox", "Tailwind CSS Tutorial", "Build 5 layouts"],
+        "duration": "1-2 months",
+        "difficulty": "Beginner"
+    },
+    "rest apis": {
+        "resources": ["RESTful API Design", "Postman practice", "Build CRUD API"],
+        "duration": "1 month",
+        "difficulty": "Intermediate"
+    },
+    "node.js": {
+        "resources": ["Node.js Docs", "Express.js Tutorial", "Build REST API"],
+        "duration": "1-2 months",
+        "difficulty": "Intermediate"
+    },
+    "tensorflow": {
+        "resources": ["TensorFlow Official Tutorials", "Deep Learning Specialization", "Kaggle kernels"],
+        "duration": "2-3 months",
+        "difficulty": "Advanced"
+    },
+    "statistics": {
+        "resources": ["Khan Academy Statistics", "StatQuest YouTube", "Think Stats (book)"],
+        "duration": "2-3 months",
+        "difficulty": "Intermediate"
+    },
+    "debugging": {
+        "resources": ["Debugging techniques", "Chrome DevTools", "Practice on real bugs"],
+        "duration": "1 month",
+        "difficulty": "Beginner"
+    },
+    "excel": {
+        "resources": ["Excel Essential Training", "PivotTables & VLOOKUP", "Practice datasets"],
+        "duration": "1 month",
+        "difficulty": "Beginner"
+    },
+    "tableau": {
+        "resources": ["Tableau Public Gallery", "Tableau Desktop Tutorial", "Build 5 dashboards"],
+        "duration": "1-2 months",
+        "difficulty": "Intermediate"
+    },
+    "communication": {
+        "resources": ["Public speaking course", "Writing skills workshop", "Practice presentations"],
+        "duration": "2-3 months",
+        "difficulty": "Beginner"
+    },
+    "product strategy": {
+        "resources": ["Inspired (book)", "Product School", "Case studies"],
+        "duration": "2-3 months",
+        "difficulty": "Intermediate"
+    },
+    "ui design": {
+        "resources": ["Refactoring UI", "Daily UI Challenge", "Dribbble inspiration"],
+        "duration": "2-3 months",
+        "difficulty": "Intermediate"
+    },
+    "figma": {
+        "resources": ["Figma Tutorial", "Design system practice", "Build 10 screens"],
+        "duration": "1 month",
+        "difficulty": "Beginner"
+    }
 }
-# fallback generic resource
-_GENERIC_RES = ["Online course (Coursera/edX/Pluralsight/Udemy)", "Hands-on projects", "Documentation & small projects"]
+
+# Generic fallback
+_GENERIC_RESOURCE = {
+    "resources": ["Online course (Coursera/Udemy)", "Official documentation", "Hands-on projects"],
+    "duration": "1-2 months",
+    "difficulty": "Intermediate"
+}
 
 
-# ---------- Skills Engine Class ----------
+# ---------- SKILLS ENGINE CLASS ----------
 class SkillsEngine:
     def __init__(self, canonical_skills=None, aliases=None, resources=None, fuzzy_threshold=80):
         self.canonical = canonical_skills or _ALL_CANONICAL_SKILLS
@@ -144,12 +227,11 @@ class SkillsEngine:
         self.resources = resources or LEARNING_RESOURCES
         self.threshold = fuzzy_threshold
 
-    # normalize token: remove non-alphanum, trim, lowercase
     def _clean_token(self, tok):
         if not tok:
             return ""
         tok = str(tok).strip().lower()
-        tok = re.sub(r"[^a-z0-9\+\-\.\s#]", " ", tok)
+        tok = re.sub(r"[^a-z0-9\+\-\.\s#/]", " ", tok)
         tok = re.sub(r"\s+", " ", tok).strip()
         return tok
 
@@ -160,26 +242,25 @@ class SkillsEngine:
         tok = self._clean_token(token)
         if not tok:
             return None
-        # direct alias
+        
+        # Direct alias
         if tok in self.aliases:
             return self.aliases[tok]
 
-        # exact match against canonical
+        # Exact match
         if tok in self.canonical:
             return tok
 
-        # rapidfuzz if available
+        # Fuzzy matching
         if _HAS_RAPIDFUZZ:
             choice, score, _ = rf_process.extractOne(tok, self.canonical, scorer=rf_fuzz.token_sort_ratio)
             if score >= self.threshold:
                 return choice
-            # also try partial ratio
             choice2, score2, _ = rf_process.extractOne(tok, self.canonical, scorer=rf_fuzz.partial_ratio)
             if score2 >= self.threshold:
                 return choice2
             return None
         else:
-            # fallback difflib
             matches = difflib.get_close_matches(tok, self.canonical, n=1, cutoff=self.threshold/100.0)
             return matches[0] if matches else None
 
@@ -189,13 +270,9 @@ class SkillsEngine:
             return None
         tok = self._alias_map(tok)
         mapped = self.fuzzy_match(tok)
-        return mapped or tok  # return mapped canonical skill or cleaned token
+        return mapped or tok
 
     def extract_skills_from_text(self, text):
-        """
-        Extract tokens from free text (commas, slashes, 'and', spaces),
-        map to canonical skills where possible.
-        """
         if text is None:
             return set()
         if isinstance(text, (list, set)):
@@ -214,10 +291,6 @@ class SkillsEngine:
         return out
 
     def extract_from_row(self, row):
-        """
-        row: pandas Series for a user
-        It combines Technical Skills, Soft Skills, Course Keywords, Project Keywords, Preferred Roles, Work Keywords, Graduate Major, PG Major, Highest Education
-        """
         fields = [
             "Technical Skills", "Soft Skills", "Course Keywords", "Project Keywords",
             "Preferred Roles", "Work Keywords", "Skill Embedding", "Graduate Major",
@@ -227,51 +300,73 @@ class SkillsEngine:
         for f in fields:
             if f in row:
                 s |= self.extract_skills_from_text(row.get(f, ""))
-
-        # also split role-like fields into tokens (e.g., "Software Engineer" -> "software engineer")
-        # and find canonical skills in skill tokens
         return s
 
     def compute_gap_for_role(self, user_skills_set, role_name):
-        role_reqs = ROLE_SKILLS.get(role_name, [])
-        role_reqs_norm = [r.lower() for r in role_reqs]
-        have = [r for r in role_reqs_norm if any((r in u) or (u in r) for u in user_skills_set)]
-        missing = [r for r in role_reqs_norm if r not in have]
-        return {"role": role_name, "have": sorted(have), "missing": sorted(missing)}
+        """Enhanced gap analysis with priorities"""
+        role_data = ROLE_SKILLS.get(role_name, {})
+        
+        result = {
+            "role": role_name,
+            "critical": {"have": [], "missing": []},
+            "important": {"have": [], "missing": []},
+            "nice_to_have": {"have": [], "missing": []}
+        }
+        
+        for priority in ["critical", "important", "nice_to_have"]:
+            reqs = [r.lower() for r in role_data.get(priority, [])]
+            have = [r for r in reqs if any((r in u) or (u in r) for u in user_skills_set)]
+            missing = [r for r in reqs if r not in have]
+            
+            result[priority]["have"] = sorted(have)
+            result[priority]["missing"] = sorted(missing)
+        
+        return result
 
     def recommend_alternatives(self, user_skills_set, top_n=3):
         scores = []
-        for role, reqs in ROLE_SKILLS.items():
-            reqs_norm = [r.lower() for r in reqs]
-            overlap = sum(1 for r in reqs_norm if any((r in u) or (u in r) for u in user_skills_set))
-            scores.append((role, overlap))
+        for role, role_data in ROLE_SKILLS.items():
+            all_reqs = []
+            for priority in ["critical", "important", "nice_to_have"]:
+                all_reqs.extend([r.lower() for r in role_data.get(priority, [])])
+            
+            overlap = sum(1 for r in all_reqs if any((r in u) or (u in r) for u in user_skills_set))
+            scores.append((role, overlap, len(all_reqs)))
+        
         scores_sorted = sorted(scores, key=lambda x: x[1], reverse=True)
-        return [r for r, s in scores_sorted[:top_n]]
+        return [(r, o, t) for r, o, t in scores_sorted[:top_n]]
 
     def make_learning_paths(self, missing_skills):
-        """
-        For each missing skill, return a short learning path (list of string suggestions).
-        """
+        """Generate learning paths with duration estimates"""
         out = {}
         for ms in missing_skills:
             ms_lower = ms.lower()
             if ms_lower in self.resources:
                 out[ms_lower] = self.resources[ms_lower]
             else:
-                # heuristic mapping: find related resource by keyword
+                # Find related resource
                 found = None
                 for k in self.resources.keys():
                     if k in ms_lower or ms_lower in k:
                         found = self.resources[k]
                         break
-                out[ms_lower] = found or _GENERIC_RES
+                out[ms_lower] = found or _GENERIC_RESOURCE
         return out
 
+    def estimate_effort(self, missing_count):
+        """Estimate total learning effort"""
+        if missing_count <= 2:
+            return "Low (1-2 months)"
+        elif missing_count <= 5:
+            return "Medium (3-6 months)"
+        else:
+            return "High (6-12 months)"
 
-# convenience instance
+
+# Convenience instance
 _DEFAULT_ENGINE = SkillsEngine()
 
-# exported helpers
+# Exported helpers
 def normalize_token(token):
     return _DEFAULT_ENGINE.normalize_and_map(token)
 
@@ -286,3 +381,6 @@ def suggest_alternatives(user_skills_set, top_n=3):
 
 def make_learning_paths(missing_skills):
     return _DEFAULT_ENGINE.make_learning_paths(missing_skills)
+
+def estimate_effort(missing_count):
+    return _DEFAULT_ENGINE.estimate_effort(missing_count)
