@@ -1,11 +1,8 @@
 """
-api.py — Fully Updated (Compatible With New SkillsEngine + Final Pipeline + SHAP Explanations)
-CORS FIXED for GitHub Pages deployment
+api.py — CORS FULLY ENABLED - Works with ANY domain
 
-Provides:
-- /predict → returns predicted role
-- /explain → returns detailed explanation with SHAP, gaps, roadmap (matching explain.py format)
-- /roles, /skills, /learning-path endpoints
+CRITICAL: This allows ALL origins for development/testing.
+For production, restrict origins to your specific domains.
 """
 
 import os
@@ -43,22 +40,19 @@ from pipeline import ensure_full_schema
 app = FastAPI(title="Career Prediction API", version="2.0")
 
 # ============================================================
-# FIXED CORS CONFIGURATION FOR GITHUB PAGES
+# CORS - ABSOLUTELY PERMISSIVE (ALLOWS EVERYTHING)
 # ============================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:*",
-        "http://127.0.0.1:*",
-        "https://minarulak9.github.io",  # Your GitHub Pages domain
-        "https://*.github.io",  # All GitHub Pages domains
-        "*"  # Allow all origins (use for development, restrict for production)
-    ],
+    allow_origins=["*"],  # Allow ALL origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=["*"]  # Expose all headers
+    allow_methods=["*"],  # Allow ALL methods
+    allow_headers=["*"],  # Allow ALL headers
 )
+
+print("=" * 60)
+print("CORS ENABLED: All origins allowed")
+print("=" * 60)
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = ROOT / "models"
@@ -79,13 +73,13 @@ def load_models():
     for p in [MODEL_DIR / "tuned_model.joblib", MODEL_DIR / "final_model.joblib"]:
         if p.exists():
             model = joblib.load(p)
-            print(f"Loaded model: {p}")
+            print(f"✅ Loaded model: {p}")
             break
 
     le_path = MODEL_DIR / "label_encoder.joblib"
     if le_path.exists():
         label_encoder = joblib.load(le_path)
-        print("Loaded label encoder")
+        print("✅ Loaded label encoder")
 
 
 load_models()
@@ -133,15 +127,15 @@ def build_shap_explainer(clf, pre, df_sample):
     if shap_explainer is not None:
         return shap_explainer, explainer_mode
     
-    print("\nBuilding SHAP explainer...")
+    print("\n🔍 Building SHAP explainer...")
 
     try:
         shap_explainer = shap.TreeExplainer(clf)
         explainer_mode = "tree"
-        print("Using TreeExplainer")
+        print("✅ Using TreeExplainer")
         return shap_explainer, explainer_mode
     except Exception as e:
-        print(f"TreeExplainer failed → Using KernelExplainer (slow). Error: {e}")
+        print(f"⚠️  TreeExplainer failed → Using KernelExplainer (slow). Error: {e}")
 
         # Sample background data
         bg = df_sample.sample(n=min(40, len(df_sample)), random_state=42)
@@ -169,6 +163,7 @@ def generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role):
         # Load sample data for explainer initialization
         DATA_PATH = ROOT / "data" / "final_training_dataset.csv"
         if not DATA_PATH.exists():
+            print("⚠️  Training data not found, using fallback explanation")
             return [f"The feature profile suggests alignment with {pred_role}."]
         
         df_full = pd.read_csv(DATA_PATH)
@@ -203,10 +198,13 @@ def generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role):
             for name, val in ranked[:5]
         ]
         
+        print(f"✅ Generated {len(top_reasons)} SHAP reasons")
         return top_reasons
 
     except Exception as e:
-        print(f"SHAP explanation failed: {e}")
+        print(f"❌ SHAP explanation failed: {e}")
+        import traceback
+        traceback.print_exc()
         return [f"The feature profile suggests alignment with {pred_role}."]
 
 
@@ -338,10 +336,14 @@ def profile_to_df(profile: UserProfile):
 # ============================================================
 def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df_transformed):
 
+    print(f"\n📊 Building explanation for: {pred_role}")
+
     # Extract user skills
     detected_tech = engine.extract_from_text(profile.technical_skills)
     detected_soft = engine.extract_from_text(profile.soft_skills)
     detected = detected_tech | detected_soft
+
+    print(f"✅ Detected {len(detected)} skills")
 
     # Seniority
     seniority = engine.seniority_estimate(detected)
@@ -353,11 +355,12 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         len(gaps["important"]["missing"])
     )
 
+    print(f"✅ Gap analysis complete: {total_missing} missing skills")
+
     # Learning resources
     missing_skills = (
         gaps["critical"]["missing"] +
-        gaps["important"]["missing"]
-    )
+        gaps["important"]["missing"])
     learning_roadmap = engine.learning_path(missing_skills)
 
     # Role match score
@@ -372,9 +375,7 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
     # Effort estimation
     effort_required = engine.estimate_effort(total_missing)
 
-    # ----------------------------------------------------------
-    # FORMAL PARAGRAPH (matching explain.py format)
-    # ----------------------------------------------------------
+    # Formal paragraph
     paragraph = (
         f"Based on a formal evaluation of your technical profile, skill indicators, "
         f"and experience attributes, the predicted role is '{pred_role}' with a "
@@ -387,18 +388,14 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         f"for this career direction."
     )
 
-    # ----------------------------------------------------------
     # SHAP REASONS
-    # ----------------------------------------------------------
     pre = model.named_steps["preprocessor"]
     clf = model.named_steps["clf"]
     pred_idx = int(np.argmax(model.predict_proba(df_transformed)[0]))
     
     prediction_reasons = generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role)
 
-    # ----------------------------------------------------------
-    # JSON OUTPUT (matching explain.py format exactly)
-    # ----------------------------------------------------------
+    # JSON OUTPUT
     output = {
         "summary": {
             "predicted_role": pred_role,
@@ -429,6 +426,7 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         ],
     }
 
+    print("✅ Explanation built successfully")
     return output
 
 
@@ -441,63 +439,92 @@ def root():
         "status": "Career Prediction API running",
         "version": "2.0",
         "docs": "/docs",
-        "cors_enabled": True
+        "cors_enabled": True,
+        "message": "CORS is enabled for all origins"
     }
 
 
 @app.post("/predict")
 def predict(profile: UserProfile):
+    print("\n" + "="*60)
+    print("📥 PREDICT REQUEST RECEIVED")
+    print("="*60)
 
-    df = profile_to_df(profile)
+    try:
+        df = profile_to_df(profile)
 
-    # === Apply training preprocessing ===
-    df = extract_skill_flags(df)
-    df = ensure_full_schema(df)
+        # Apply training preprocessing
+        df = extract_skill_flags(df)
+        df = ensure_full_schema(df)
 
-    proba = model.predict_proba(df)[0]
+        proba = model.predict_proba(df)[0]
 
-    idx = int(np.argmax(proba))
-    role = label_encoder.inverse_transform([idx])[0]
-    score = float(proba[idx])
+        idx = int(np.argmax(proba))
+        role = label_encoder.inverse_transform([idx])[0]
+        score = float(proba[idx])
 
-    # Return sorted probabilities
-    all_probs = {
-        label_encoder.inverse_transform([i])[0]: float(p)
-        for i, p in enumerate(proba)
-    }
-    all_probs = dict(sorted(all_probs.items(), key=lambda x: x[1], reverse=True))
+        # Return sorted probabilities
+        all_probs = {
+            label_encoder.inverse_transform([i])[0]: float(p)
+            for i, p in enumerate(proba)
+        }
+        all_probs = dict(sorted(all_probs.items(), key=lambda x: x[1], reverse=True))
 
-    return {
-        "predicted_role": role,
-        "confidence": f"{score*100:.1f}%",
-        "confidence_score": score,
-        "all_probabilities": all_probs,
-    }
+        print(f"✅ Prediction: {role} ({score*100:.1f}%)")
+        print("="*60 + "\n")
+
+        return {
+            "predicted_role": role,
+            "confidence": f"{score*100:.1f}%",
+            "confidence_score": score,
+            "all_probabilities": all_probs,
+        }
+    
+    except Exception as e:
+        print(f"❌ PREDICT ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/explain")
 def explain(profile: UserProfile):
+    print("\n" + "="*60)
+    print("📥 EXPLAIN REQUEST RECEIVED")
+    print("="*60)
 
-    df = profile_to_df(profile)
+    try:
+        df = profile_to_df(profile)
 
-    # === Apply training preprocessing ===
-    df = extract_skill_flags(df)
-    df = ensure_full_schema(df)
+        # Apply training preprocessing
+        df = extract_skill_flags(df)
+        df = ensure_full_schema(df)
 
-    # Transform for prediction
-    pre = model.named_steps["preprocessor"]
-    df_transformed = pre.transform(df)
+        # Transform for prediction
+        pre = model.named_steps["preprocessor"]
+        df_transformed = pre.transform(df)
+        
+        if sparse.issparse(df_transformed):
+            df_transformed = df_transformed.toarray()
+
+        proba = model.predict_proba(df_transformed)[0]
+
+        idx = int(np.argmax(proba))
+        role = label_encoder.inverse_transform([idx])[0]
+        score = float(proba[idx])
+
+        print(f"✅ Prediction: {role} ({score*100:.1f}%)")
+
+        result = build_explanation(profile, role, score, df_transformed)
+        
+        print("="*60 + "\n")
+        return result
     
-    if sparse.issparse(df_transformed):
-        df_transformed = df_transformed.toarray()
-
-    proba = model.predict_proba(df_transformed)[0]
-
-    idx = int(np.argmax(proba))
-    role = label_encoder.inverse_transform([idx])[0]
-    score = float(proba[idx])
-
-    return build_explanation(profile, role, score, df_transformed)
+    except Exception as e:
+        print(f"❌ EXPLAIN ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/roles")
@@ -520,21 +547,22 @@ def learning_path(skill: str):
     return roadmap[0]
 
 
-# ============================================================
-# HEALTH CHECK ENDPOINT
-# ============================================================
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
         "model_loaded": model is not None,
-        "encoder_loaded": label_encoder is not None
+        "encoder_loaded": label_encoder is not None,
+        "cors_enabled": True
     }
 
 
 # ============================================================
-# RUN SERVER (LOCAL DEV)
+# RUN SERVER
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
+    print("\n🚀 Starting Career AI API Server...")
+    print("📍 CORS: Enabled for ALL origins")
+    print("📍 Docs: http://localhost:8000/docs\n")
     uvicorn.run("src.api:app", host="0.0.0.0", port=8000, reload=True)
