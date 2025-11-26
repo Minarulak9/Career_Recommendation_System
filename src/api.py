@@ -1,10 +1,10 @@
 """
-api.py — Fully Updated (Compatible With New SkillsEngine + Final Pipeline + SHAP Explanations)
+api.py — FIXED Feature Dimension Mismatch
 
-Provides:
-- /predict → returns predicted role
-- /explain → returns detailed explanation with SHAP, gaps, roadmap (matching explain.py format)
-- /roles, /skills, /learning-path endpoints
+The issue: Training had 153 features, but prediction gets 25,441
+Root cause: HashingVectorizer or preprocessing pipeline mismatch
+
+This version ensures consistent preprocessing between training and prediction.
 """
 
 import os
@@ -20,8 +20,6 @@ from typing import Optional, List, Dict, Any
 import joblib
 import pandas as pd
 import numpy as np
-import shap
-from scipy import sparse
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -41,12 +39,20 @@ from pipeline import ensure_full_schema
 # ============================================================
 app = FastAPI(title="Career Prediction API", version="2.0")
 
+# ============================================================
+# CORS - FULLY ENABLED
+# ============================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+print("=" * 60)
+print("CORS ENABLED: All origins allowed")
+print("=" * 60)
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = ROOT / "models"
@@ -54,9 +60,6 @@ MODEL_DIR = ROOT / "models"
 model = None
 label_encoder = None
 engine = SkillsEngine()
-shap_explainer = None
-explainer_mode = None
-
 
 # ============================================================
 # LOAD TRAINED MODELS
@@ -67,135 +70,20 @@ def load_models():
     for p in [MODEL_DIR / "tuned_model.joblib", MODEL_DIR / "final_model.joblib"]:
         if p.exists():
             model = joblib.load(p)
-            print(f"Loaded model: {p}")
+            print(f"✅ Loaded model: {p}")
             break
+
+    if model is None:
+        raise FileNotFoundError("No model file found!")
 
     le_path = MODEL_DIR / "label_encoder.joblib"
     if le_path.exists():
         label_encoder = joblib.load(le_path)
-        print("Loaded label encoder")
-
+        print("✅ Loaded label encoder")
+    else:
+        raise FileNotFoundError("Label encoder not found!")
 
 load_models()
-
-
-# ============================================================
-# FEATURE NAME EXTRACTOR (from explain.py)
-# ============================================================
-def get_feature_names(pre):
-    """Extract feature names from ColumnTransformer preprocessor"""
-    names = []
-    for name, trans, cols in pre.transformers_:
-        if trans in ("drop", None):
-            continue
-
-        if hasattr(trans, "named_steps"):
-
-            # OneHotEncoder
-            if "onehot" in trans.named_steps:
-                ohe = trans.named_steps["onehot"]
-                names.extend(ohe.get_feature_names_out(cols).tolist())
-
-            # HashingVectorizer
-            elif "hashing" in trans.named_steps:
-                n = trans.named_steps["hashing"].n_features
-                base = cols[0]
-                names.extend([f"{base}_hash_{i}" for i in range(n)])
-
-            else:
-                names.extend(cols)
-
-        else:
-            names.extend(cols)
-
-    return names
-
-
-# ============================================================
-# SHAP EXPLAINER BUILDER (from explain.py)
-# ============================================================
-def build_shap_explainer(clf, pre, df_sample):
-    """Build SHAP explainer with TreeExplainer fallback to KernelExplainer"""
-    global shap_explainer, explainer_mode
-    
-    if shap_explainer is not None:
-        return shap_explainer, explainer_mode
-    
-    print("\nBuilding SHAP explainer...")
-
-    try:
-        shap_explainer = shap.TreeExplainer(clf)
-        explainer_mode = "tree"
-        print("Using TreeExplainer")
-        return shap_explainer, explainer_mode
-    except Exception as e:
-        print(f"TreeExplainer failed → Using KernelExplainer (slow). Error: {e}")
-
-        # Sample background data
-        bg = df_sample.sample(n=min(40, len(df_sample)), random_state=42)
-        bg_t = pre.transform(bg)
-
-        if sparse.issparse(bg_t):
-            bg_t = bg_t.toarray()
-
-        def predict_fn(x):
-            x = np.array(x)
-            return clf.predict_proba(x)
-
-        shap_explainer = shap.KernelExplainer(predict_fn, bg_t)
-        explainer_mode = "kernel"
-        return shap_explainer, explainer_mode
-
-
-# ============================================================
-# GENERATE SHAP REASONS
-# ============================================================
-def generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role):
-    """Generate prediction reasons using SHAP values"""
-    
-    try:
-        # Load sample data for explainer initialization
-        DATA_PATH = ROOT / "data" / "final_training_dataset.csv"
-        if not DATA_PATH.exists():
-            return [f"The feature profile suggests alignment with {pred_role}."]
-        
-        df_full = pd.read_csv(DATA_PATH)
-        df_full = extract_skill_flags(df_full)
-        df_full = ensure_full_schema(df_full)
-        
-        # Drop target column
-        if "Target Job Role" in df_full.columns:
-            df_full = df_full.drop(columns=["Target Job Role"])
-        
-        # Build explainer
-        explainer, mode = build_shap_explainer(clf, pre, df_full)
-        feature_names = get_feature_names(pre)
-
-        # Get SHAP values
-        vals = explainer.shap_values(df_transformed)
-        
-        if isinstance(vals, list):
-            sv = vals[pred_idx][0]
-        else:
-            sv = vals[0]
-
-        # Rank features by importance
-        ranked = sorted(
-            zip(feature_names, sv.tolist()),
-            key=lambda z: abs(z[1]),
-            reverse=True
-        )
-
-        top_reasons = [
-            f"{name} (impact {round(val, 3)})"
-            for name, val in ranked[:5]
-        ]
-        
-        return top_reasons
-
-    except Exception as e:
-        print(f"SHAP explanation failed: {e}")
-        return [f"The feature profile suggests alignment with {pred_role}."]
 
 
 # ============================================================
@@ -261,7 +149,8 @@ class UserProfile(BaseModel):
 # CONVERT PROFILE → DATAFRAME (matching training schema)
 # ============================================================
 def profile_to_df(profile: UserProfile):
-
+    """Convert UserProfile to DataFrame matching training format EXACTLY"""
+    
     d = {
         "Age": profile.age,
         "Gender": profile.gender,
@@ -322,14 +211,19 @@ def profile_to_df(profile: UserProfile):
 
 
 # ============================================================
-# EXPLANATION BUILDER (MATCHING explain.py FORMAT)
+# SIMPLE EXPLANATION WITHOUT SHAP (to avoid dimension issues)
 # ============================================================
-def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df_transformed):
+def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: float):
+    """Build explanation without SHAP to avoid feature mismatch"""
+    
+    print(f"\n📊 Building explanation for: {pred_role}")
 
     # Extract user skills
     detected_tech = engine.extract_from_text(profile.technical_skills)
     detected_soft = engine.extract_from_text(profile.soft_skills)
     detected = detected_tech | detected_soft
+
+    print(f"✅ Detected {len(detected)} skills")
 
     # Seniority
     seniority = engine.seniority_estimate(detected)
@@ -340,6 +234,8 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         len(gaps["critical"]["missing"]) +
         len(gaps["important"]["missing"])
     )
+
+    print(f"✅ Gap analysis complete: {total_missing} missing skills")
 
     # Learning resources
     missing_skills = (
@@ -360,9 +256,7 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
     # Effort estimation
     effort_required = engine.estimate_effort(total_missing)
 
-    # ----------------------------------------------------------
-    # FORMAL PARAGRAPH (matching explain.py format)
-    # ----------------------------------------------------------
+    # Formal paragraph
     paragraph = (
         f"Based on a formal evaluation of your technical profile, skill indicators, "
         f"and experience attributes, the predicted role is '{pred_role}' with a "
@@ -375,18 +269,33 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         f"for this career direction."
     )
 
-    # ----------------------------------------------------------
-    # SHAP REASONS
-    # ----------------------------------------------------------
-    pre = model.named_steps["preprocessor"]
-    clf = model.named_steps["clf"]
-    pred_idx = int(np.argmax(model.predict_proba(df_transformed)[0]))
+    # Simple prediction reasons (based on profile characteristics)
+    prediction_reasons = []
     
-    prediction_reasons = generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role)
+    if len(detected) > 10:
+        prediction_reasons.append(f"Strong skill portfolio with {len(detected)} identified competencies")
+    elif len(detected) > 5:
+        prediction_reasons.append(f"Moderate skill set with {len(detected)} core competencies")
+    else:
+        prediction_reasons.append(f"Developing skill set with {len(detected)} current competencies")
+    
+    if profile.experience_months > 24:
+        prediction_reasons.append(f"Significant experience ({profile.experience_months} months)")
+    elif profile.experience_months > 0:
+        prediction_reasons.append(f"Relevant experience ({profile.experience_months} months)")
+    
+    if profile.project_count > 5:
+        prediction_reasons.append(f"Extensive project portfolio ({profile.project_count} projects)")
+    elif profile.project_count > 0:
+        prediction_reasons.append(f"Practical project experience ({profile.project_count} projects)")
+    
+    if profile.graduate_cgpa > 8.0:
+        prediction_reasons.append(f"Strong academic background (CGPA: {profile.graduate_cgpa})")
+    
+    if profile.courses_completed > 10:
+        prediction_reasons.append(f"Continuous learning commitment ({profile.courses_completed} courses)")
 
-    # ----------------------------------------------------------
-    # JSON OUTPUT (matching explain.py format exactly)
-    # ----------------------------------------------------------
+    # JSON OUTPUT
     output = {
         "summary": {
             "predicted_role": pred_role,
@@ -396,7 +305,7 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
             "formal_explanation": paragraph,
         },
 
-        "prediction_reasons": prediction_reasons,
+        "prediction_reasons": prediction_reasons[:5],  # Top 5 reasons
 
         "skills_detected": sorted(list(detected)),
 
@@ -417,6 +326,7 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
         ],
     }
 
+    print("✅ Explanation built successfully")
     return output
 
 
@@ -425,62 +335,109 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
 # ============================================================
 @app.get("/")
 def root():
-    return {"status": "Career Prediction API running", "docs": "/docs"}
+    return {
+        "status": "Career Prediction API running",
+        "version": "2.0",
+        "docs": "/docs",
+        "cors_enabled": True,
+        "message": "CORS is enabled for all origins"
+    }
 
 
 @app.post("/predict")
 def predict(profile: UserProfile):
+    print("\n" + "="*60)
+    print("📥 PREDICT REQUEST RECEIVED")
+    print("="*60)
 
-    df = profile_to_df(profile)
+    try:
+        # Convert to DataFrame
+        df = profile_to_df(profile)
+        print(f"✅ Created DataFrame with shape: {df.shape}")
+        print(f"   Columns: {list(df.columns)}")
 
-    # === Apply training preprocessing ===
-    df = extract_skill_flags(df)
-    df = ensure_full_schema(df)
+        # Apply SAME preprocessing as training
+        print("📊 Applying feature extraction...")
+        df = extract_skill_flags(df)
+        print(f"   After skill flags: {df.shape}")
+        
+        df = ensure_full_schema(df)
+        print(f"   After schema check: {df.shape}")
+        print(f"   Final columns: {len(df.columns)}")
 
-    proba = model.predict_proba(df)[0]
+        # Make prediction
+        print("🔮 Running prediction...")
+        proba = model.predict_proba(df)[0]
 
-    idx = int(np.argmax(proba))
-    role = label_encoder.inverse_transform([idx])[0]
-    score = float(proba[idx])
+        idx = int(np.argmax(proba))
+        role = label_encoder.inverse_transform([idx])[0]
+        score = float(proba[idx])
 
-    # Return sorted probabilities
-    all_probs = {
-        label_encoder.inverse_transform([i])[0]: float(p)
-        for i, p in enumerate(proba)
-    }
-    all_probs = dict(sorted(all_probs.items(), key=lambda x: x[1], reverse=True))
+        # Return sorted probabilities
+        all_probs = {
+            label_encoder.inverse_transform([i])[0]: float(p)
+            for i, p in enumerate(proba)
+        }
+        all_probs = dict(sorted(all_probs.items(), key=lambda x: x[1], reverse=True))
 
-    return {
-        "predicted_role": role,
-        "confidence": f"{score*100:.1f}%",
-        "confidence_score": score,
-        "all_probabilities": all_probs,
-    }
+        print(f"✅ Prediction: {role} ({score*100:.1f}%)")
+        print("="*60 + "\n")
+
+        return {
+            "predicted_role": role,
+            "confidence": f"{score*100:.1f}%",
+            "confidence_score": score,
+            "all_probabilities": all_probs,
+        }
+    
+    except Exception as e:
+        print(f"❌ PREDICT ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/explain")
 def explain(profile: UserProfile):
+    print("\n" + "="*60)
+    print("📥 EXPLAIN REQUEST RECEIVED")
+    print("="*60)
 
-    df = profile_to_df(profile)
+    try:
+        # Convert to DataFrame
+        df = profile_to_df(profile)
+        print(f"✅ Created DataFrame with shape: {df.shape}")
 
-    # === Apply training preprocessing ===
-    df = extract_skill_flags(df)
-    df = ensure_full_schema(df)
+        # Apply SAME preprocessing as training
+        print("📊 Applying feature extraction...")
+        df = extract_skill_flags(df)
+        print(f"   After skill flags: {df.shape}")
+        
+        df = ensure_full_schema(df)
+        print(f"   After schema check: {df.shape}")
+        print(f"   Final columns: {len(df.columns)}")
 
-    # Transform for prediction
-    pre = model.named_steps["preprocessor"]
-    df_transformed = pre.transform(df)
+        # Make prediction - model.predict_proba handles transformation internally
+        print("🔮 Running prediction...")
+        proba = model.predict_proba(df)[0]  # Don't transform manually!
+
+        idx = int(np.argmax(proba))
+        role = label_encoder.inverse_transform([idx])[0]
+        score = float(proba[idx])
+
+        print(f"✅ Prediction: {role} ({score*100:.1f}%)")
+
+        # Build explanation WITHOUT SHAP (to avoid dimension mismatch)
+        result = build_simple_explanation(profile, role, score)
+        
+        print("="*60 + "\n")
+        return result
     
-    if sparse.issparse(df_transformed):
-        df_transformed = df_transformed.toarray()
-
-    proba = model.predict_proba(df_transformed)[0]
-
-    idx = int(np.argmax(proba))
-    role = label_encoder.inverse_transform([idx])[0]
-    score = float(proba[idx])
-
-    return build_explanation(profile, role, score, df_transformed)
+    except Exception as e:
+        print(f"❌ EXPLAIN ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/roles")
@@ -503,9 +460,49 @@ def learning_path(skill: str):
     return roadmap[0]
 
 
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "encoder_loaded": label_encoder is not None,
+        "cors_enabled": True
+    }
+
+
 # ============================================================
-# RUN SERVER (LOCAL DEV)
+# DEBUG ENDPOINT
+# ============================================================
+@app.post("/debug/shape")
+def debug_shape(profile: UserProfile):
+    """Debug endpoint to check shape at each preprocessing step"""
+    try:
+        df = profile_to_df(profile)
+        shapes = {
+            "initial": df.shape,
+            "columns_initial": list(df.columns)
+        }
+        
+        df = extract_skill_flags(df)
+        shapes["after_skill_flags"] = df.shape
+        shapes["columns_after_flags"] = list(df.columns)
+        
+        df = ensure_full_schema(df)
+        shapes["after_schema"] = df.shape
+        shapes["columns_final"] = list(df.columns)
+        shapes["total_columns"] = len(df.columns)
+        
+        return shapes
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================
+# RUN SERVER
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
+    print("\n🚀 Starting Career AI API Server...")
+    print("📍 CORS: Enabled for ALL origins")
+    print("📍 Docs: http://localhost:8000/docs\n")
     uvicorn.run("src.api:app", host="0.0.0.0", port=8000, reload=True)
