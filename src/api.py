@@ -1,5 +1,6 @@
 """
 api.py — Fully Updated (Compatible With New SkillsEngine + Final Pipeline + SHAP Explanations)
+CORS FIXED for GitHub Pages deployment
 
 Provides:
 - /predict → returns predicted role
@@ -41,11 +42,22 @@ from pipeline import ensure_full_schema
 # ============================================================
 app = FastAPI(title="Career Prediction API", version="2.0")
 
+# ============================================================
+# FIXED CORS CONFIGURATION FOR GITHUB PAGES
+# ============================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "https://minarulak9.github.io",  # Your GitHub Pages domain
+        "https://*.github.io",  # All GitHub Pages domains
+        "*"  # Allow all origins (use for development, restrict for production)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"]  # Expose all headers
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -425,7 +437,12 @@ def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df
 # ============================================================
 @app.get("/")
 def root():
-    return {"status": "Career Prediction API running", "docs": "/docs"}
+    return {
+        "status": "Career Prediction API running",
+        "version": "2.0",
+        "docs": "/docs",
+        "cors_enabled": True
+    }
 
 
 @app.post("/predict")
@@ -501,6 +518,18 @@ def learning_path(skill: str):
     if not roadmap:
         return {"skill": skill, "error": "No resources found"}
     return roadmap[0]
+
+
+# ============================================================
+# HEALTH CHECK ENDPOINT
+# ============================================================
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "encoder_loaded": label_encoder is not None
+    }
 
 
 # ============================================================
