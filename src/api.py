@@ -1,9 +1,9 @@
 """
-api.py — Fully Updated (Compatible With New SkillsEngine + Final Pipeline)
+api.py — Fully Updated (Compatible With New SkillsEngine + Final Pipeline + SHAP Explanations)
 
 Provides:
 - /predict → returns predicted role
-- /explain → returns detailed explanation, gaps, roadmap
+- /explain → returns detailed explanation with SHAP, gaps, roadmap (matching explain.py format)
 - /roles, /skills, /learning-path endpoints
 """
 
@@ -20,6 +20,11 @@ from typing import Optional, List, Dict, Any
 import joblib
 import pandas as pd
 import numpy as np
+import shap
+from scipy import sparse
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # Import upgraded Skills Engine
 from skills_engine import (
@@ -49,6 +54,8 @@ MODEL_DIR = ROOT / "models"
 model = None
 label_encoder = None
 engine = SkillsEngine()
+shap_explainer = None
+explainer_mode = None
 
 
 # ============================================================
@@ -70,6 +77,125 @@ def load_models():
 
 
 load_models()
+
+
+# ============================================================
+# FEATURE NAME EXTRACTOR (from explain.py)
+# ============================================================
+def get_feature_names(pre):
+    """Extract feature names from ColumnTransformer preprocessor"""
+    names = []
+    for name, trans, cols in pre.transformers_:
+        if trans in ("drop", None):
+            continue
+
+        if hasattr(trans, "named_steps"):
+
+            # OneHotEncoder
+            if "onehot" in trans.named_steps:
+                ohe = trans.named_steps["onehot"]
+                names.extend(ohe.get_feature_names_out(cols).tolist())
+
+            # HashingVectorizer
+            elif "hashing" in trans.named_steps:
+                n = trans.named_steps["hashing"].n_features
+                base = cols[0]
+                names.extend([f"{base}_hash_{i}" for i in range(n)])
+
+            else:
+                names.extend(cols)
+
+        else:
+            names.extend(cols)
+
+    return names
+
+
+# ============================================================
+# SHAP EXPLAINER BUILDER (from explain.py)
+# ============================================================
+def build_shap_explainer(clf, pre, df_sample):
+    """Build SHAP explainer with TreeExplainer fallback to KernelExplainer"""
+    global shap_explainer, explainer_mode
+    
+    if shap_explainer is not None:
+        return shap_explainer, explainer_mode
+    
+    print("\nBuilding SHAP explainer...")
+
+    try:
+        shap_explainer = shap.TreeExplainer(clf)
+        explainer_mode = "tree"
+        print("Using TreeExplainer")
+        return shap_explainer, explainer_mode
+    except Exception as e:
+        print(f"TreeExplainer failed → Using KernelExplainer (slow). Error: {e}")
+
+        # Sample background data
+        bg = df_sample.sample(n=min(40, len(df_sample)), random_state=42)
+        bg_t = pre.transform(bg)
+
+        if sparse.issparse(bg_t):
+            bg_t = bg_t.toarray()
+
+        def predict_fn(x):
+            x = np.array(x)
+            return clf.predict_proba(x)
+
+        shap_explainer = shap.KernelExplainer(predict_fn, bg_t)
+        explainer_mode = "kernel"
+        return shap_explainer, explainer_mode
+
+
+# ============================================================
+# GENERATE SHAP REASONS
+# ============================================================
+def generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role):
+    """Generate prediction reasons using SHAP values"""
+    
+    try:
+        # Load sample data for explainer initialization
+        DATA_PATH = ROOT / "data" / "final_training_dataset.csv"
+        if not DATA_PATH.exists():
+            return [f"The feature profile suggests alignment with {pred_role}."]
+        
+        df_full = pd.read_csv(DATA_PATH)
+        df_full = extract_skill_flags(df_full)
+        df_full = ensure_full_schema(df_full)
+        
+        # Drop target column
+        if "Target Job Role" in df_full.columns:
+            df_full = df_full.drop(columns=["Target Job Role"])
+        
+        # Build explainer
+        explainer, mode = build_shap_explainer(clf, pre, df_full)
+        feature_names = get_feature_names(pre)
+
+        # Get SHAP values
+        vals = explainer.shap_values(df_transformed)
+        
+        if isinstance(vals, list):
+            sv = vals[pred_idx][0]
+        else:
+            sv = vals[0]
+
+        # Rank features by importance
+        ranked = sorted(
+            zip(feature_names, sv.tolist()),
+            key=lambda z: abs(z[1]),
+            reverse=True
+        )
+
+        top_reasons = [
+            f"{name} (impact {round(val, 3)})"
+            for name, val in ranked[:5]
+        ]
+        
+        return top_reasons
+
+    except Exception as e:
+        print(f"SHAP explanation failed: {e}")
+        return [f"The feature profile suggests alignment with {pred_role}."]
 
 
 # ============================================================
@@ -196,50 +322,102 @@ def profile_to_df(profile: UserProfile):
 
 
 # ============================================================
-# EXPLANATION BUILDER (SKILLS + GAPS + ROADMAP)
+# EXPLANATION BUILDER (MATCHING explain.py FORMAT)
 # ============================================================
-def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float):
+def build_explanation(profile: UserProfile, pred_role: str, pred_prob: float, df_transformed):
 
     # Extract user skills
     detected_tech = engine.extract_from_text(profile.technical_skills)
     detected_soft = engine.extract_from_text(profile.soft_skills)
     detected = detected_tech | detected_soft
 
-    # Gap analysis
-    gaps = engine.compute_gap(detected, pred_role)
-    missing = gaps["critical"]["missing"] + gaps["important"]["missing"]
-
-    # Roadmap (NEW engine)
-    roadmap = engine.learning_path(missing)
-
     # Seniority
     seniority = engine.seniority_estimate(detected)
+
+    # Gap analysis
+    gaps = engine.compute_gap(detected, pred_role)
+    total_missing = (
+        len(gaps["critical"]["missing"]) +
+        len(gaps["important"]["missing"])
+    )
+
+    # Learning resources
+    missing_skills = (
+        gaps["critical"]["missing"] +
+        gaps["important"]["missing"]
+    )
+    learning_roadmap = engine.learning_path(missing_skills)
+
+    # Role match score
+    match_score = engine.compute_role_match(detected, pred_role)
+
+    # Project recommendation
+    flagship_project = engine.recommend_project(pred_role)
 
     # Alternatives
     alternatives = engine.alternatives(detected, exclude=pred_role)
 
-    return {
+    # Effort estimation
+    effort_required = engine.estimate_effort(total_missing)
+
+    # ----------------------------------------------------------
+    # FORMAL PARAGRAPH (matching explain.py format)
+    # ----------------------------------------------------------
+    paragraph = (
+        f"Based on a formal evaluation of your technical profile, skill indicators, "
+        f"and experience attributes, the predicted role is '{pred_role}' with a "
+        f"confidence level of {pred_prob * 100:.1f}%. The assessment identifies "
+        f"notable strengths in several foundational areas; however, development is "
+        f"recommended in crucial skills such as "
+        f"{', '.join(gaps['critical']['missing'][:2]) if gaps['critical']['missing'] else 'core domain fundamentals'}. "
+        f"Your current competency level is classified as '{seniority}', and the "
+        f"proposed learning roadmap provides a structured path to strengthen readiness "
+        f"for this career direction."
+    )
+
+    # ----------------------------------------------------------
+    # SHAP REASONS
+    # ----------------------------------------------------------
+    pre = model.named_steps["preprocessor"]
+    clf = model.named_steps["clf"]
+    pred_idx = int(np.argmax(model.predict_proba(df_transformed)[0]))
+    
+    prediction_reasons = generate_shap_reasons(clf, pre, df_transformed, pred_idx, pred_role)
+
+    # ----------------------------------------------------------
+    # JSON OUTPUT (matching explain.py format exactly)
+    # ----------------------------------------------------------
+    output = {
         "summary": {
-            "role": pred_role,
+            "predicted_role": pred_role,
             "confidence": f"{pred_prob * 100:.1f}%",
-            "match_score": f"{engine.compute_role_match(detected, pred_role)}%",
+            "match_score": f"{match_score}%",
             "seniority": seniority,
+            "formal_explanation": paragraph,
         },
+
+        "prediction_reasons": prediction_reasons,
 
         "skills_detected": sorted(list(detected)),
 
         "skill_gaps": gaps,
 
         "learning_path": {
-            "roadmap": roadmap,
-            "effort_required": engine.estimate_effort(len(missing)),
-            "recommended_project": engine.recommend_project(pred_role),
+            "skills_based_courses_projects": learning_roadmap,
+            "flagship_project": flagship_project,
+            "effort_required": effort_required,
         },
 
         "alternative_roles": [
-            {"role": r, "match_score": f"{m}%"} for r, m in alternatives
+            {
+                "role": r,
+                "match_score": f"{score}%"
+            }
+            for r, score in alternatives
         ],
     }
+
+    return output
 
 
 # ============================================================
@@ -255,7 +433,7 @@ def predict(profile: UserProfile):
 
     df = profile_to_df(profile)
 
-    # === NEW: apply training preprocessing ===
+    # === Apply training preprocessing ===
     df = extract_skill_flags(df)
     df = ensure_full_schema(df)
 
@@ -285,17 +463,24 @@ def explain(profile: UserProfile):
 
     df = profile_to_df(profile)
 
-    # === NEW: apply training preprocessing ===
+    # === Apply training preprocessing ===
     df = extract_skill_flags(df)
     df = ensure_full_schema(df)
 
-    proba = model.predict_proba(df)[0]
+    # Transform for prediction
+    pre = model.named_steps["preprocessor"]
+    df_transformed = pre.transform(df)
+    
+    if sparse.issparse(df_transformed):
+        df_transformed = df_transformed.toarray()
+
+    proba = model.predict_proba(df_transformed)[0]
 
     idx = int(np.argmax(proba))
     role = label_encoder.inverse_transform([idx])[0]
     score = float(proba[idx])
 
-    return build_explanation(profile, role, score)
+    return build_explanation(profile, role, score, df_transformed)
 
 
 @app.get("/roles")
