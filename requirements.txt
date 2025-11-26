@@ -8,7 +8,8 @@ matplotlib
 jinja2
 imbalanced-learn
 scipy>=1.11.0
-
+seaborn
+wordcloud
 # API
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
