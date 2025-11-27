@@ -5170,13 +5170,15 @@ Full API documentation available at: `/docs` (Swagger UI)
 **Project Title:** Career AI Recommendation System Using Machine Learning and Explainable AI
 
 **Team Members:**
-- [Student 1 Name] - [Roll Number]
-- [Student 2 Name] - [Roll Number]
-- [Student 3 Name] - [Roll Number]
+- Minarul Hoque (PG/SOET/28/24/060)
+- Rohan Dey (PG/SOET/28/24/062)
+- Ritwik Ghosh (PG/SOET/28/24/004)
+- Raktim Kumar (PG/SOET/28/24/005)
+- Ataur Rahaman Ddin (PG/SOET/28/24/043)
 
 **Project Duration:** January 2024 - June 2024 (6 months)
 
-**Guide:** [Guide Name], [Designation]
+**Guide:** [Dr. Debdutta Pal], [Professor]
 
 **Institution:** School of Engineering & Technology, Adamas University, Kolkata
 
@@ -5212,5 +5214,5 @@ Full API documentation available at: `/docs` (Swagger UI)
 
 *Submitted in partial fulfillment of the requirements for the degree of Master of Computer Applications (MCA) at Adamas University, Kolkata, West Bengal.*
 
-**Date of Submission:** [Insert Date]  
+**Date of Submission:** 27/11/2025  
 **Academic Year:** 2024-2025
