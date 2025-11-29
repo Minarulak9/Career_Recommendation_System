@@ -1,10 +1,13 @@
 """
-api.py — FIXED Feature Dimension Mismatch
+api.py — FIXED Prediction vs Skill Match Issue
 
-The issue: Training had 153 features, but prediction gets 25,441
-Root cause: HashingVectorizer or preprocessing pipeline mismatch
+The issue: Model predicts "AI Engineer" with 15.5% confidence when user has Frontend skills
+Root cause: Disconnection between model prediction and skill-based role matching
 
-This version ensures consistent preprocessing between training and prediction.
+This version:
+- Uses skill-based role matching when model confidence is low
+- Provides more reliable career recommendations
+- Maintains consistency between predicted role and skill gap analysis
 """
 
 import os
@@ -37,7 +40,7 @@ from pipeline import ensure_full_schema
 # ============================================================
 # APP INIT
 # ============================================================
-app = FastAPI(title="Career Prediction API", version="2.0")
+app = FastAPI(title="Career Prediction API", version="2.1")
 
 # ============================================================
 # CORS - FULLY ENABLED
@@ -211,25 +214,78 @@ def profile_to_df(profile: UserProfile):
 
 
 # ============================================================
-# SIMPLE EXPLANATION WITHOUT SHAP (to avoid dimension issues)
+# ENHANCED EXPLANATION WITH SKILL-BASED FALLBACK
 # ============================================================
-def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: float):
-    """Build explanation without SHAP to avoid feature mismatch"""
+def build_smart_explanation(profile: UserProfile, pred_role: str, pred_prob: float, all_probabilities: dict):
+    """
+    Build explanation with intelligent fallback:
+    - If model confidence is low (<30%) AND skill match is poor (<20%),
+      use the best skill-matched role instead
+    """
     
-    print(f"\n📊 Building explanation for: {pred_role}")
+    print(f"\n📊 Building explanation for model prediction: {pred_role} ({pred_prob*100:.1f}%)")
 
     # Extract user skills
     detected_tech = engine.extract_from_text(profile.technical_skills)
     detected_soft = engine.extract_from_text(profile.soft_skills)
     detected = detected_tech | detected_soft
 
-    print(f"✅ Detected {len(detected)} skills")
+    print(f"✅ Detected {len(detected)} skills: {sorted(list(detected))[:10]}...")
 
     # Seniority
     seniority = engine.seniority_estimate(detected)
 
-    # Gap analysis
-    gaps = engine.compute_gap(detected, pred_role)
+    # CRITICAL FIX: Calculate skill match scores for ALL roles
+    role_skill_matches = {}
+    for role in ROLE_SKILLS.keys():
+        score = engine.compute_role_match(detected, role)
+        role_skill_matches[role] = score
+    
+    # Sort by skill match score
+    sorted_skill_matches = sorted(role_skill_matches.items(), key=lambda x: x[1], reverse=True)
+    
+    print("\n🔍 Skill Match Scores:")
+    for role, score in sorted_skill_matches:
+        print(f"   {role}: {score}%")
+    
+    # Get model's confidence for predicted role
+    model_confidence = pred_prob * 100  # Convert to percentage
+    skill_match_for_predicted = role_skill_matches[pred_role]
+    
+    print(f"\n📊 Model Prediction: {pred_role}")
+    print(f"   - Model Confidence: {model_confidence:.1f}%")
+    print(f"   - Skill Match Score: {skill_match_for_predicted}%")
+    
+    # Decision logic: Use skill-based recommendation if model is unreliable
+    USE_SKILL_MATCH_THRESHOLD = 30  # If model confidence < 30%
+    POOR_SKILL_MATCH_THRESHOLD = 20  # If skill match < 20%
+    
+    final_role = pred_role
+    final_confidence = pred_prob
+    final_match_score = skill_match_for_predicted
+    recommendation_method = "model"
+    
+    if model_confidence < USE_SKILL_MATCH_THRESHOLD and skill_match_for_predicted < POOR_SKILL_MATCH_THRESHOLD:
+        # Use best skill-matched role instead
+        best_skill_role = sorted_skill_matches[0][0]
+        best_skill_score = sorted_skill_matches[0][1]
+        
+        print(f"\n⚠️ Low model confidence ({model_confidence:.1f}%) with poor skill match ({skill_match_for_predicted}%)")
+        print(f"✅ Using best skill-matched role: {best_skill_role} (skill match: {best_skill_score}%)")
+        
+        final_role = best_skill_role
+        final_match_score = best_skill_score
+        # Use skill match as confidence when using skill-based recommendation
+        final_confidence = best_skill_score / 100.0
+        recommendation_method = "skill_match"
+    
+    print(f"\n🎯 Final Recommendation: {final_role}")
+    print(f"   - Method: {recommendation_method}")
+    print(f"   - Confidence: {final_confidence*100:.1f}%")
+    print(f"   - Skill Match: {final_match_score}%")
+
+    # Gap analysis for FINAL role
+    gaps = engine.compute_gap(detected, final_role)
     total_missing = (
         len(gaps["critical"]["missing"]) +
         len(gaps["important"]["missing"])
@@ -244,24 +300,24 @@ def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: fl
     )
     learning_roadmap = engine.learning_path(missing_skills)
 
-    # Role match score
-    match_score = engine.compute_role_match(detected, pred_role)
-
     # Project recommendation
-    flagship_project = engine.recommend_project(pred_role)
+    flagship_project = engine.recommend_project(final_role)
 
-    # Alternatives
-    alternatives = engine.alternatives(detected, exclude=pred_role)
+    # Alternatives (exclude final role)
+    alternatives = engine.alternatives(detected, exclude=final_role)
 
     # Effort estimation
     effort_required = engine.estimate_effort(total_missing)
 
     # Formal paragraph
+    confidence_text = "high" if final_confidence > 0.7 else "moderate" if final_confidence > 0.4 else "preliminary"
+    
     paragraph = (
         f"Based on a formal evaluation of your technical profile, skill indicators, "
-        f"and experience attributes, the predicted role is '{pred_role}' with a "
-        f"confidence level of {pred_prob * 100:.1f}%. The assessment identifies "
-        f"notable strengths in several foundational areas; however, development is "
+        f"and experience attributes, the recommended role is '{final_role}' with a "
+        f"{confidence_text} confidence level of {final_confidence * 100:.1f}% "
+        f"(skill match score: {final_match_score}%). "
+        f"The assessment identifies notable strengths in several foundational areas; however, development is "
         f"recommended in crucial skills such as "
         f"{', '.join(gaps['critical']['missing'][:2]) if gaps['critical']['missing'] else 'core domain fundamentals'}. "
         f"Your current competency level is classified as '{seniority}', and the "
@@ -271,6 +327,12 @@ def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: fl
 
     # Simple prediction reasons (based on profile characteristics)
     prediction_reasons = []
+    
+    # Add recommendation method note
+    if recommendation_method == "skill_match":
+        prediction_reasons.append(f"Recommendation based on skill profile analysis (your skills align {final_match_score}% with {final_role})")
+    else:
+        prediction_reasons.append(f"AI model prediction with {final_confidence*100:.1f}% confidence")
     
     if len(detected) > 10:
         prediction_reasons.append(f"Strong skill portfolio with {len(detected)} identified competencies")
@@ -298,10 +360,11 @@ def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: fl
     # JSON OUTPUT
     output = {
         "summary": {
-            "predicted_role": pred_role,
-            "confidence": f"{pred_prob * 100:.1f}%",
-            "match_score": f"{match_score}%",
+            "predicted_role": final_role,
+            "confidence": f"{final_confidence * 100:.1f}%",
+            "match_score": f"{final_match_score}%",
             "seniority": seniority,
+            "recommendation_method": recommendation_method,
             "formal_explanation": paragraph,
         },
 
@@ -324,6 +387,16 @@ def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: fl
             }
             for r, score in alternatives
         ],
+        
+        # Additional debug info
+        "model_info": {
+            "original_model_prediction": pred_role,
+            "original_model_confidence": f"{pred_prob * 100:.1f}%",
+            "all_skill_matches": {
+                role: f"{score}%" 
+                for role, score in sorted_skill_matches
+            }
+        }
     }
 
     print("✅ Explanation built successfully")
@@ -337,10 +410,10 @@ def build_simple_explanation(profile: UserProfile, pred_role: str, pred_prob: fl
 def root():
     return {
         "status": "Career Prediction API running",
-        "version": "2.0",
+        "version": "2.1 - Fixed",
         "docs": "/docs",
         "cors_enabled": True,
-        "message": "CORS is enabled for all origins"
+        "message": "Skill-based fallback enabled for low-confidence predictions"
     }
 
 
@@ -354,7 +427,6 @@ def predict(profile: UserProfile):
         # Convert to DataFrame
         df = profile_to_df(profile)
         print(f"✅ Created DataFrame with shape: {df.shape}")
-        print(f"   Columns: {list(df.columns)}")
 
         # Apply SAME preprocessing as training
         print("📊 Applying feature extraction...")
@@ -363,7 +435,6 @@ def predict(profile: UserProfile):
         
         df = ensure_full_schema(df)
         print(f"   After schema check: {df.shape}")
-        print(f"   Final columns: {len(df.columns)}")
 
         # Make prediction
         print("🔮 Running prediction...")
@@ -415,20 +486,25 @@ def explain(profile: UserProfile):
         
         df = ensure_full_schema(df)
         print(f"   After schema check: {df.shape}")
-        print(f"   Final columns: {len(df.columns)}")
 
-        # Make prediction - model.predict_proba handles transformation internally
+        # Make prediction
         print("🔮 Running prediction...")
-        proba = model.predict_proba(df)[0]  # Don't transform manually!
+        proba = model.predict_proba(df)[0]
 
         idx = int(np.argmax(proba))
         role = label_encoder.inverse_transform([idx])[0]
         score = float(proba[idx])
+        
+        # Get all probabilities
+        all_probs = {
+            label_encoder.inverse_transform([i])[0]: float(p)
+            for i, p in enumerate(proba)
+        }
 
-        print(f"✅ Prediction: {role} ({score*100:.1f}%)")
+        print(f"✅ Model Prediction: {role} ({score*100:.1f}%)")
 
-        # Build explanation WITHOUT SHAP (to avoid dimension mismatch)
-        result = build_simple_explanation(profile, role, score)
+        # Build SMART explanation with skill-based fallback
+        result = build_smart_explanation(profile, role, score, all_probs)
         
         print("="*60 + "\n")
         return result
@@ -466,7 +542,8 @@ def health_check():
         "status": "healthy",
         "model_loaded": model is not None,
         "encoder_loaded": label_encoder is not None,
-        "cors_enabled": True
+        "cors_enabled": True,
+        "version": "2.1-fixed"
     }
 
 
@@ -497,12 +574,39 @@ def debug_shape(profile: UserProfile):
         return {"error": str(e)}
 
 
+@app.post("/debug/skill-analysis")
+def debug_skill_analysis(profile: UserProfile):
+    """Debug endpoint to analyze skill extraction and matching"""
+    try:
+        detected_tech = engine.extract_from_text(profile.technical_skills)
+        detected_soft = engine.extract_from_text(profile.soft_skills)
+        detected = detected_tech | detected_soft
+        
+        role_matches = {}
+        for role in ROLE_SKILLS.keys():
+            score = engine.compute_role_match(detected, role)
+            role_matches[role] = score
+        
+        sorted_matches = sorted(role_matches.items(), key=lambda x: x[1], reverse=True)
+        
+        return {
+            "detected_skills": sorted(list(detected)),
+            "skill_count": len(detected),
+            "seniority": engine.seniority_estimate(detected),
+            "role_skill_matches": dict(sorted_matches),
+            "best_match": sorted_matches[0][0] if sorted_matches else None,
+            "best_match_score": sorted_matches[0][1] if sorted_matches else 0
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ============================================================
 # RUN SERVER
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
-    print("\n🚀 Starting Career AI API Server...")
+    print("\n🚀 Starting Career AI API Server (FIXED VERSION)...")
     print("📍 CORS: Enabled for ALL origins")
     print("📍 Docs: http://localhost:8000/docs\n")
     uvicorn.run("src.api:app", host="0.0.0.0", port=8000, reload=True)
